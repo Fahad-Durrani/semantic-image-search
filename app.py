@@ -1,0 +1,1328 @@
+# -*- coding: utf-8 -*-
+import os
+import sys
+import json
+import hashlib
+import threading
+import queue
+import colorsys
+import numpy as np
+import torch
+from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
+from PIL import Image
+from collections import Counter
+
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+IMAGES_DIR  = os.path.join(BASE_DIR, "images_repo")
+CACHE_FILE  = os.path.join(BASE_DIR, "cache", "embeddings.npz")
+CHECKPOINT  = os.path.join(BASE_DIR, "checkpoints", "mobileclip_s2.pt")
+COLORS_FILE = os.path.join(BASE_DIR, "cache", "colors.json")
+SKIP_FILE   = os.path.join(BASE_DIR, "cache", "skip_list.json")
+SUGGESTIONS_FILE = os.path.join(BASE_DIR, "cache", "suggestions.json")
+MODEL_NAME        = "mobileclip_s2"
+DEFAULT_K         = 10
+MAX_K             = 50
+DEDUP_THRESHOLD   = 0.999
+SUGGEST_THRESHOLD = 0.20
+NEGATIVE_WEIGHT   = 0.5
+SUPPORTED_EXTS    = {".jpg", ".jpeg", ".png", ".webp", ".avif", ".jfif"}
+
+COLOR_HEX = {
+    "red":    "#e53935", "orange": "#fb8c00", "yellow": "#fdd835",
+    "green":  "#43a047", "cyan":   "#00acc1", "blue":   "#1e88e5",
+    "purple": "#8e24aa", "pink":   "#e91e63", "brown":  "#6d4c41",
+    "white":  "#f5f5f5", "gray":   "#78909c", "black":  "#212121",
+}
+
+VOCAB = list(dict.fromkeys([
+    # --- Domestic pets ---
+    "dog", "dogs", "puppy", "puppies", "pup",
+    "cat", "cats", "kitten", "kittens",
+    "rabbit", "rabbits", "bunny", "hamster", "gerbil",
+    "parrot", "budgie", "cockatiel",
+    "goldfish", "turtle", "gecko", "iguana",
+
+    # --- Farm animals ---
+    "horse", "horses", "pony", "foal", "colt", "mare", "stallion",
+    "cow", "cows", "bull", "calf", "cattle",
+    "sheep", "lamb", "goat", "goats",
+    "pig", "piglet", "pigs",
+    "chicken", "rooster", "hen", "chick",
+    "turkey", "duck", "ducks", "goose", "geese",
+    "donkey", "mule", "llama", "alpaca",
+
+    # --- Big cats ---
+    "tiger", "tigers", "lion", "lions", "lioness", "cub",
+    "leopard", "cheetah", "panther", "jaguar", "lynx", "bobcat", "cougar", "puma",
+
+    # --- Wild canines ---
+    "wolf", "wolves", "fox", "foxes", "coyote", "jackal", "dingo",
+
+    # --- Bears ---
+    "bear", "bears", "panda", "grizzly", "polar",
+
+    # --- Deer family ---
+    "deer", "fawn", "elk", "moose", "reindeer", "caribou",
+
+    # --- African & savanna wildlife ---
+    "elephant", "giraffe", "zebra", "rhinoceros", "hippo",
+    "antelope", "gazelle", "impala", "wildebeest", "bison", "buffalo",
+    "hyena", "meerkat", "warthog",
+
+    # --- Primates ---
+    "gorilla", "chimpanzee", "orangutan", "baboon", "monkey", "lemur", "gibbon",
+
+    # --- Small & misc mammals ---
+    "raccoon", "squirrel", "chipmunk", "otter", "badger",
+    "hedgehog", "opossum", "skunk", "mongoose",
+    "kangaroo", "koala", "wallaby",
+    "seal", "walrus", "dolphin", "whale", "orca",
+    "bat", "mole", "weasel",
+
+    # --- Raptors ---
+    "eagle", "hawk", "falcon", "osprey", "vulture", "kite",
+
+    # --- Owls ---
+    "owl",
+
+    # --- Wading & water birds ---
+    "heron", "crane", "stork", "flamingo", "pelican", "spoonbill",
+
+    # --- Exotic & tropical birds ---
+    "toucan", "macaw", "cockatoo", "peacock", "kingfisher",
+    "hummingbird", "woodpecker", "hornbill",
+
+    # --- Common birds ---
+    "bird", "birds", "sparrow", "robin", "pigeon", "dove", "swift",
+    "swan", "puffin", "penguin", "albatross",
+    "pheasant", "quail", "jay",
+
+    # --- Reptiles ---
+    "snake", "cobra", "python",
+    "lizard", "chameleon",
+    "crocodile", "alligator",
+    "frog", "toad", "salamander",
+
+    # --- Insects ---
+    "butterfly", "bee", "dragonfly", "ladybug", "moth", "beetle",
+
+    # --- Marine life ---
+    "shark", "jellyfish", "octopus", "crab", "lobster", "seahorse", "ray",
+
+    # --- Dog breeds ---
+    "husky", "labrador", "shepherd", "rottweiler", "bulldog",
+    "poodle", "beagle", "dalmatian", "boxer", "terrier",
+    "collie", "pug", "chihuahua", "dachshund",
+    "greyhound", "samoyed", "corgi", "doberman",
+    "spaniel", "retriever", "setter", "pointer",
+    "vizsla", "weimaraner", "schnauzer", "mastiff",
+    "maltese", "bichon", "malamute", "akita",
+    "basenji", "ridgeback", "whippet", "newfoundland",
+
+    # --- Cat breeds ---
+    "siamese", "persian", "ragdoll", "bengal",
+    "sphynx", "abyssinian", "burmese",
+
+    # --- Horse breeds ---
+    "thoroughbred", "arabian", "appaloosa", "friesian", "mustang", "clydesdale",
+
+    # --- People ---
+    "woman", "women", "girl", "girls",
+    "man", "men", "boy", "boys",
+    "child", "children", "baby", "toddler", "teenager",
+    "couple", "family", "group", "crowd",
+    "person", "people",
+    "portrait", "selfie", "face", "profile",
+    "model", "athlete", "soldier", "rider", "jockey",
+
+    # --- Human actions ---
+    "running", "jogging", "sprinting",
+    "walking", "hiking", "strolling",
+    "jumping", "leaping", "diving",
+    "swimming", "surfing", "kayaking",
+    "cycling", "riding", "galloping", "trotting",
+    "climbing", "rappelling",
+    "playing", "dancing", "singing",
+    "sitting", "standing", "lying", "crouching",
+    "sleeping", "resting",
+    "smiling", "laughing", "crying",
+    "eating", "drinking", "cooking",
+    "reading", "working", "fishing", "hunting",
+    "skiing", "snowboarding", "skating",
+    "stretching", "meditating", "training",
+    "herding", "grazing", "prowling", "stalking",
+
+    # --- Expressions / mood ---
+    "happy", "playful", "fierce", "calm", "curious", "alert",
+    "aggressive", "relaxed", "proud", "majestic",
+
+    # --- Landscapes ---
+    "forest", "jungle", "rainforest", "woodland", "grove",
+    "meadow", "field", "prairie", "savanna", "steppe", "pasture",
+    "mountain", "mountains", "peak", "summit", "cliff", "ridge",
+    "hill", "hills", "valley", "canyon", "gorge",
+    "desert", "dunes",
+    "tundra", "glacier", "iceberg",
+    "lake", "pond", "river", "stream", "creek",
+    "ocean", "sea", "bay", "coast", "shoreline",
+    "beach", "island",
+    "waterfall", "rapids", "marsh", "swamp",
+    "cave", "rock", "cliff",
+
+    # --- Sky & weather ---
+    "sky", "clouds", "cloudy",
+    "sunset", "sunrise", "twilight", "dusk", "dawn",
+    "night", "stars", "moon",
+    "fog", "mist", "haze",
+    "rain", "storm", "lightning",
+    "snow", "snowfall", "blizzard",
+    "rainbow", "sunshine", "overcast",
+
+    # --- Flora ---
+    "flower", "flowers", "wildflower", "blossom", "bloom",
+    "rose", "tulip", "sunflower", "daisy", "lily", "orchid", "lavender",
+    "tree", "trees", "oak", "pine", "palm", "birch", "willow", "bamboo",
+    "leaf", "leaves", "foliage",
+    "grass", "moss", "fern", "cactus",
+    "garden", "bush", "mushroom",
+
+    # --- Urban & architecture ---
+    "city", "skyline", "skyscraper", "building",
+    "street", "road", "bridge", "alley",
+    "park", "fountain", "statue",
+    "house", "cabin", "cottage", "barn", "farmhouse",
+    "church", "castle", "ruins", "lighthouse",
+    "market", "village",
+
+    # --- Sports ---
+    "soccer", "football", "basketball", "tennis", "golf",
+    "volleyball", "baseball", "rugby", "cricket",
+    "boxing", "wrestling", "gymnastics", "archery",
+    "equestrian", "marathon",
+
+    # --- Visual descriptors ---
+    "wild", "domestic", "free",
+    "young", "adult", "elderly", "juvenile",
+    "tiny", "large", "giant",
+    "fluffy", "furry", "feathered", "scaled",
+    "spotted", "striped", "patchy",
+    "white", "black", "brown", "golden", "grey", "orange",
+    "colorful", "dark", "bright",
+    "beautiful", "elegant", "rare", "exotic", "endangered",
+    "cute", "adorable",
+    "closeup", "macro", "silhouette", "aerial", "underwater",
+    "wildlife", "nature", "outdoor", "indoor",
+    "winter", "summer", "spring", "autumn",
+    "tropical", "arctic", "alpine",
+    "misty", "snowy", "foggy", "rainy", "sunny",
+    "nocturnal", "camouflage",
+]))
+
+app = Flask(__name__)
+
+# ---------------------------------------------------------------------------
+# Load once at startup
+# ---------------------------------------------------------------------------
+if not os.path.isfile(CACHE_FILE):
+    sys.exit("Cache not found -- run build_index.py first.")
+if not os.path.isfile(CHECKPOINT):
+    sys.exit(f"Checkpoint not found: {CHECKPOINT}")
+
+print("Loading embedding cache...", flush=True)
+_data      = np.load(CACHE_FILE)
+EMBEDDINGS = _data["embeddings"]   # (N, 512) float32, L2-normalised
+FILENAMES  = _data["filenames"]    # (N,)
+N_IMAGES   = len(FILENAMES)
+print(f"  {N_IMAGES} images indexed.", flush=True)
+
+print("Loading MobileClip-S2...", flush=True)
+import mobileclip
+MODEL, _, IMAGE_TRANSFORM = mobileclip.create_model_and_transforms(MODEL_NAME, pretrained=CHECKPOINT)
+TOKENIZER                 = mobileclip.get_tokenizer(MODEL_NAME)
+MODEL.eval()
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+MODEL  = MODEL.to(DEVICE)
+print(f"  Model ready on {DEVICE}.", flush=True)
+
+# ---------------------------------------------------------------------------
+# Color palette index (built once in background, cached to disk)
+# ---------------------------------------------------------------------------
+COLOR_INDEX = {}
+SKIP_SET    = set()   # filenames that failed to encode; persisted to cache/skip_list.json
+
+
+def _load_skip_set():
+    global SKIP_SET
+    if os.path.isfile(SKIP_FILE):
+        try:
+            with open(SKIP_FILE, encoding="utf-8") as f:
+                SKIP_SET = set(json.load(f))
+        except Exception:
+            pass
+
+
+_load_skip_set()
+
+
+def _rgb_to_color_name(r, g, b):
+    h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+    if v < 0.12:
+        return "black"
+    if v > 0.88 and s < 0.12:
+        return "white"
+    if s < 0.12:
+        return "gray"
+    h360 = h * 360
+    if h360 < 15 or h360 >= 345:
+        return "red"
+    if h360 < 45:
+        return "orange"
+    if h360 < 65:
+        return "yellow"
+    if h360 < 155:
+        return "green"
+    if h360 < 195:
+        return "cyan"
+    if h360 < 255:
+        return "blue"
+    if h360 < 285:
+        return "purple"
+    return "pink"
+
+
+def _extract_dominant_colors(img_path, n=3):
+    try:
+        img = Image.open(img_path).convert("RGB").resize((25, 25), Image.LANCZOS)
+        counts = Counter(_rgb_to_color_name(r, g, b) for r, g, b in img.getdata())
+        return [c for c, _ in counts.most_common(n)]
+    except Exception:
+        return []
+
+
+def _build_color_index_bg():
+    global COLOR_INDEX
+    if os.path.isfile(COLORS_FILE):
+        try:
+            with open(COLORS_FILE, encoding="utf-8") as f:
+                COLOR_INDEX = json.load(f)
+            print(f"  Color index loaded ({len(COLOR_INDEX)} images).", flush=True)
+            return
+        except Exception:
+            pass
+    print(f"Building color index for {N_IMAGES} images (background)...", flush=True)
+    idx = {}
+    for i, fname in enumerate(FILENAMES):
+        path = os.path.join(IMAGES_DIR, str(fname))
+        idx[str(fname)] = _extract_dominant_colors(path)
+        if (i + 1) % 1000 == 0:
+            print(f"  color index: {i + 1}/{N_IMAGES}", flush=True)
+    try:
+        with open(COLORS_FILE, "w", encoding="utf-8") as f:
+            json.dump(idx, f)
+    except Exception:
+        pass
+    COLOR_INDEX = idx
+    print(f"  Color index ready ({len(idx)} images).", flush=True)
+
+
+threading.Thread(target=_build_color_index_bg, daemon=True).start()
+
+# ---------------------------------------------------------------------------
+# Suggestion / autocomplete index
+# ---------------------------------------------------------------------------
+_VOCAB_HASH = hashlib.md5("|".join(sorted(VOCAB)).encode()).hexdigest()[:12]
+
+
+def build_suggestion_index():
+    if os.path.isfile(SUGGESTIONS_FILE):
+        with open(SUGGESTIONS_FILE, encoding="utf-8") as f:
+            cached = json.load(f)
+        if cached.get("_vocab_hash") == _VOCAB_HASH:
+            cached.pop("_vocab_hash")
+            return cached
+        print("Vocab changed -- rebuilding suggestion index...", flush=True)
+    else:
+        print(f"Building suggestion index for {len(VOCAB)} terms...", flush=True)
+
+    result     = {}
+    batch_size = 64
+    for i in range(0, len(VOCAB), batch_size):
+        batch  = VOCAB[i : i + batch_size]
+        tokens = TOKENIZER(batch).to(DEVICE)
+        with torch.no_grad():
+            feats = MODEL.encode_text(tokens)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+        vecs = feats.cpu().numpy().astype("float32")
+        sims = EMBEDDINGS @ vecs.T
+        for j, term in enumerate(batch):
+            result[term] = int((sims[:, j] > SUGGEST_THRESHOLD).sum())
+
+    payload = dict(result)
+    payload["_vocab_hash"] = _VOCAB_HASH
+    with open(SUGGESTIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+    print(f"  Done -- {len(result)} terms indexed.", flush=True)
+    return result
+
+
+def build_prefix_index(suggestions):
+    index = {}
+    for term, count in sorted(suggestions.items(), key=lambda x: -x[1]):
+        if count == 0:
+            continue
+        for length in range(2, len(term) + 1):
+            prefix = term[:length]
+            bucket = index.setdefault(prefix, [])
+            if len(bucket) < 20:
+                bucket.append({"term": term, "count": count})
+    return index
+
+
+SUGGESTIONS  = build_suggestion_index()
+PREFIX_INDEX = build_prefix_index(SUGGESTIONS)
+print(f"Server ready -- http://127.0.0.1:5000\n", flush=True)
+
+# ---------------------------------------------------------------------------
+# Index rebuild (background thread + SSE queue)
+# Incrementally encodes any images in images_repo that aren't indexed yet.
+# ---------------------------------------------------------------------------
+_rebuild_queue   = queue.Queue()
+_rebuild_lock    = threading.Lock()
+_rebuild_running = False
+
+
+def _do_rebuild():
+    global EMBEDDINGS, FILENAMES, N_IMAGES, _rebuild_running, COLOR_INDEX, SKIP_SET
+
+    _rebuild_queue.put({"type": "start"})
+    all_disk_files = sorted(
+        f for f in os.listdir(IMAGES_DIR)
+        if os.path.splitext(f)[1].lower() in SUPPORTED_EXTS
+    )
+
+    indexed_set = set(FILENAMES.tolist())
+    new_files   = [f for f in all_disk_files
+                   if f not in indexed_set and f not in SKIP_SET]
+
+    if not new_files:
+        _rebuild_queue.put({"type": "progress", "done": 0, "total": 0,
+                            "msg": "Index already up to date -- nothing to do."})
+        _rebuild_queue.put({"type": "done", "total": N_IMAGES})
+        with _rebuild_lock:
+            _rebuild_running = False
+        return
+
+    total = len(new_files)
+    _rebuild_queue.put({"type": "progress", "done": 0, "total": total,
+                        "msg": f"Found {total} new image(s) to index"})
+
+    new_embs, new_fnames, failed_fnames = [], [], []
+    batch_size = 16
+    for i in range(0, total, batch_size):
+        batch_files = new_files[i : i + batch_size]
+        imgs, valid = [], []
+        for fname in batch_files:
+            try:
+                img = Image.open(os.path.join(IMAGES_DIR, fname)).convert("RGB")
+                imgs.append(IMAGE_TRANSFORM(img))
+                valid.append(fname)
+            except Exception:
+                failed_fnames.append(fname)
+        if imgs:
+            tensor = torch.stack(imgs).to(DEVICE)
+            with torch.no_grad():
+                feats = MODEL.encode_image(tensor)
+                feats = feats / feats.norm(dim=-1, keepdim=True)
+            new_embs.append(feats.cpu().numpy().astype("float32"))
+            new_fnames.extend(valid)
+        _rebuild_queue.put({"type": "progress",
+                            "done": min(i + batch_size, total), "total": total,
+                            "msg": f"Encoded {len(new_fnames)} image(s)"})
+
+    # Persist files that couldn't be opened so they're not retried next rebuild
+    if failed_fnames:
+        SKIP_SET.update(failed_fnames)
+        try:
+            with open(SKIP_FILE, "w", encoding="utf-8") as f:
+                json.dump(sorted(SKIP_SET), f)
+        except Exception:
+            pass
+
+    if new_embs:
+        added_embs   = np.vstack(new_embs)
+        added_fnames = np.array(new_fnames)
+        EMBEDDINGS   = np.vstack([EMBEDDINGS, added_embs])
+        FILENAMES    = np.append(FILENAMES, added_fnames)
+        N_IMAGES     = len(FILENAMES)
+        np.savez(CACHE_FILE, embeddings=EMBEDDINGS, filenames=FILENAMES)
+
+        _rebuild_queue.put({"type": "progress", "done": total, "total": total,
+                            "msg": "Extracting colors for new images..."})
+        for fname in new_fnames:
+            COLOR_INDEX[fname] = _extract_dominant_colors(os.path.join(IMAGES_DIR, fname))
+        try:
+            with open(COLORS_FILE, "w", encoding="utf-8") as f:
+                json.dump(COLOR_INDEX, f)
+        except Exception:
+            pass
+
+    _rebuild_queue.put({"type": "done", "total": N_IMAGES})
+    with _rebuild_lock:
+        _rebuild_running = False
+
+
+# ---------------------------------------------------------------------------
+# Search helpers
+# ---------------------------------------------------------------------------
+
+def encode_text(text):
+    tokens = TOKENIZER([text]).to(DEVICE)
+    with torch.no_grad():
+        feat = MODEL.encode_text(tokens)
+        feat = feat / feat.norm(dim=-1, keepdim=True)
+    return feat.cpu().numpy().astype("float32")[0]
+
+
+def encode_image_pil(pil_img):
+    tensor = IMAGE_TRANSFORM(pil_img).unsqueeze(0).to(DEVICE)
+    with torch.no_grad():
+        feat = MODEL.encode_image(tensor)
+        feat = feat / feat.norm(dim=-1, keepdim=True)
+    return feat.cpu().numpy().astype("float32")[0]
+
+
+def parse_query(query):
+    """Split 'tiger -cage -cub' into ('tiger', ['cage', 'cub'])."""
+    words     = query.split()
+    positives = [w for w in words if not w.startswith("-")]
+    negatives = [w.lstrip("-") for w in words if w.startswith("-") and len(w) > 1]
+    return " ".join(positives).strip(), negatives
+
+
+def _apply_color_filter(scores, color):
+    if not color or not COLOR_INDEX:
+        return scores
+    scores = scores.copy()
+    mask   = np.array([color not in COLOR_INDEX.get(str(f), []) for f in FILENAMES])
+    scores[mask] = -1.0
+    return scores
+
+
+def run_search(vec, k, exclude_idx=None, color_filter=None):
+    """Relevance-ranked search. Pixel-identical duplicates (cosine > DEDUP_THRESHOLD)
+    are collapsed into the result they duplicate and reported as duplicate_count."""
+    scores = EMBEDDINGS @ vec
+    if exclude_idx is not None:
+        scores = scores.copy()
+        scores[exclude_idx] = -1.0
+    scores = _apply_color_filter(scores, color_filter)
+
+    oversample = min(k * 10, N_IMAGES)
+    if oversample >= N_IMAGES:
+        candidates = np.argsort(scores)[::-1].tolist()
+    else:
+        top_pool   = np.argpartition(scores, -oversample)[-oversample:]
+        candidates = top_pool[np.argsort(scores[top_pool])[::-1]].tolist()
+    candidates = [c for c in candidates if scores[c] > -0.5]
+
+    selected, dup_counts = [], []
+    remaining = list(candidates)
+    while len(selected) < k and remaining:
+        best_idx = remaining.pop(0)
+        best_emb = EMBEDDINGS[best_idx]
+        dup_count = 0
+        if remaining:
+            dup_sims  = EMBEDDINGS[np.array(remaining, dtype=np.int64)] @ best_emb
+            dup_mask  = dup_sims > DEDUP_THRESHOLD
+            dup_count = int(dup_mask.sum())
+            remaining = [i for i, d in zip(remaining, dup_mask) if not d]
+        selected.append(best_idx)
+        dup_counts.append(dup_count)
+
+    return [
+        {
+            "rank":            i + 1,
+            "filename":        str(FILENAMES[idx]),
+            "score":           round(float(scores[idx]), 4),
+            "url":             f"/images/{FILENAMES[idx]}",
+            "duplicate_count": dup_counts[i],
+        }
+        for i, idx in enumerate(selected)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.route("/")
+def index():
+    return FRONTEND_HTML.replace("{{N_IMAGES}}", f"{N_IMAGES:,}")
+
+
+@app.route("/images/<path:filename>")
+def serve_image(filename):
+    return send_from_directory(IMAGES_DIR, filename)
+
+
+@app.route("/search")
+def search():
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify({"error": "Empty query"}), 400
+
+    try:
+        k = min(int(request.args.get("k", DEFAULT_K)), MAX_K)
+    except ValueError:
+        k = DEFAULT_K
+
+    color_filter = request.args.get("color", "").strip().lower() or None
+
+    positive, negatives = parse_query(query)
+    if not positive:
+        return jsonify({"error": "Query has no positive terms"}), 400
+
+    vec = encode_text(positive)
+    if negatives:
+        neg_vecs = np.stack([encode_text(t) for t in negatives])
+        vec      = vec - NEGATIVE_WEIGHT * neg_vecs.mean(axis=0)
+        norm     = float(np.linalg.norm(vec))
+        if norm > 1e-8:
+            vec = vec / norm
+
+    results = run_search(vec, k, color_filter=color_filter)
+    return jsonify({"query": query, "positive": positive,
+                    "negatives": negatives, "k": k, "results": results})
+
+
+@app.route("/similar")
+def similar():
+    filename = request.args.get("img", "").strip()
+    if not filename:
+        return jsonify({"error": "No image specified"}), 400
+
+    matches = np.where(FILENAMES == filename)[0]
+    if len(matches) == 0:
+        return jsonify({"error": f"Image not found: {filename}"}), 404
+
+    query_idx = int(matches[0])
+    try:
+        k = min(int(request.args.get("k", DEFAULT_K)), MAX_K)
+    except ValueError:
+        k = DEFAULT_K
+
+    vec     = EMBEDDINGS[query_idx].copy()
+    results = run_search(vec, k, exclude_idx=query_idx)
+    return jsonify({"query_image": filename, "k": k, "results": results})
+
+
+@app.route("/search_by_image", methods=["POST"])
+def search_by_image():
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+    f = request.files["image"]
+    try:
+        pil_img = Image.open(f.stream).convert("RGB")
+    except Exception as e:
+        return jsonify({"error": f"Invalid image: {e}"}), 400
+
+    try:
+        k = min(int(request.args.get("k", DEFAULT_K)), MAX_K)
+    except ValueError:
+        k = DEFAULT_K
+
+    vec     = encode_image_pil(pil_img)
+    results = run_search(vec, k)
+    return jsonify({"query_image": f.filename or "uploaded image", "k": k, "results": results})
+
+
+@app.route("/suggest")
+def suggest():
+    prefix = request.args.get("q", "").strip().lower()
+    if len(prefix) < 2:
+        return jsonify([])
+    limit = min(int(request.args.get("limit", "8")), 20)
+    return jsonify(PREFIX_INDEX.get(prefix, [])[:limit])
+
+
+@app.route("/colors")
+def colors():
+    available = sorted({c for cols in COLOR_INDEX.values() for c in cols})
+    return jsonify(available)
+
+
+@app.route("/rebuild", methods=["POST"])
+def rebuild():
+    global _rebuild_running
+    with _rebuild_lock:
+        if _rebuild_running:
+            return jsonify({"error": "Rebuild already in progress"}), 409
+        _rebuild_running = True
+    threading.Thread(target=_do_rebuild, daemon=True).start()
+    return jsonify({"status": "started"})
+
+
+@app.route("/rebuild_stream")
+def rebuild_stream():
+    def generate():
+        while True:
+            try:
+                item = _rebuild_queue.get(timeout=30)
+                yield f"data: {json.dumps(item)}\n\n"
+                if item.get("type") in ("done", "error"):
+                    break
+            except queue.Empty:
+                yield 'data: {"type":"ping"}\n\n'
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Frontend
+# ---------------------------------------------------------------------------
+
+FRONTEND_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MobileClipS2 Image Search</title>
+<style>
+:root {
+  --bg: #f0f2f5; --bg2: #fff; --bg3: #f5f5f5;
+  --hdr-bg: #1a1a2e; --hdr-text: #fff;
+  --text: #1a1a2e; --text2: #666; --text3: #999;
+  --border: #e0e0e0; --input-border: #ccc;
+  --accent: #1a73e8; --accent-h: #1558c0; --accent-lite: #f0f6ff;
+  --neg-bg: #fce8e6; --neg-text: #c62828;
+  --dup-bg: #fff3e0; --dup-text: #e65100;
+  --card-img-bg: #eee;
+  --sh-sm: 0 1px 5px rgba(0,0,0,.10);
+  --sh-md: 0 4px 14px rgba(0,0,0,.15);
+}
+[data-theme="dark"] {
+  --bg: #111827; --bg2: #1f2937; --bg3: #374151;
+  --hdr-bg: #030712; --hdr-text: #f9fafb;
+  --text: #f9fafb; --text2: #9ca3af; --text3: #6b7280;
+  --border: #374151; --input-border: #4b5563;
+  --accent: #60a5fa; --accent-h: #3b82f6; --accent-lite: #1e3a5f;
+  --neg-bg: #450a0a; --neg-text: #fca5a5;
+  --dup-bg: #431407; --dup-text: #fdba74;
+  --card-img-bg: #374151;
+  --sh-sm: 0 1px 5px rgba(0,0,0,.35);
+  --sh-md: 0 4px 14px rgba(0,0,0,.50);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+       background: var(--bg); color: var(--text); min-height: 100vh;
+       transition: background .2s, color .2s; }
+
+header { background: var(--hdr-bg); color: var(--hdr-text); padding: 16px 32px;
+         display: flex; align-items: center; gap: 12px;
+         box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+header h1 { font-size: 1.18rem; font-weight: 700; }
+header .sub { font-size: .74rem; opacity: .5; margin-top: 2px; }
+#rebuildBtn {
+  margin-left: auto; background: rgba(255,255,255,.12); color: var(--hdr-text);
+  border: 1px solid rgba(255,255,255,.25); border-radius: 7px;
+  padding: 7px 14px; font-size: .82rem; cursor: pointer;
+  transition: background .15s; white-space: nowrap; flex-shrink: 0;
+}
+#rebuildBtn:hover { background: rgba(255,255,255,.24); }
+#themeToggle {
+  background: rgba(255,255,255,.12); color: var(--hdr-text);
+  border: 1px solid rgba(255,255,255,.25); border-radius: 7px;
+  padding: 7px 11px; font-size: .9rem; cursor: pointer; line-height: 1;
+  transition: background .15s; white-space: nowrap; flex-shrink: 0;
+}
+#themeToggle:hover { background: rgba(255,255,255,.24); }
+
+.search-bar {
+  background: var(--bg2); border-bottom: 1px solid var(--border);
+  padding: 12px 32px; display: flex; gap: 10px; align-items: center;
+  position: sticky; top: 0; z-index: 20;
+  box-shadow: 0 1px 4px rgba(0,0,0,.08); transition: box-shadow .2s, background .2s;
+}
+.search-bar.drag-over { box-shadow: 0 0 0 3px var(--accent) inset; background: var(--accent-lite); }
+.autocomplete-wrap { flex: 1; position: relative; }
+.search-bar input[type=text] {
+  width: 100%; padding: 10px 16px; border: 1.5px solid var(--input-border);
+  border-radius: 8px; font-size: 1rem; outline: none; transition: border-color .15s;
+  background: var(--bg2); color: var(--text);
+}
+.search-bar input[type=text]:focus { border-color: var(--accent); }
+.ac-dropdown {
+  display: none; position: absolute; top: calc(100% + 5px); left: 0; right: 0;
+  background: var(--bg2); border: 1.5px solid var(--border); border-radius: 8px;
+  box-shadow: var(--sh-md); z-index: 50; overflow: hidden;
+}
+.ac-dropdown.open { display: block; }
+.ac-item { display: flex; align-items: center; justify-content: space-between;
+           padding: 9px 14px; cursor: pointer; transition: background .1s; }
+.ac-item:hover, .ac-item.active { background: var(--accent-lite); }
+.ac-term { font-size: .93rem; color: var(--text); font-weight: 500; }
+.ac-term em { font-style: normal; color: var(--accent); }
+.ac-count { font-size: .76rem; color: var(--text3); white-space: nowrap; margin-left: 12px; }
+
+#uploadBtn {
+  padding: 10px 12px; background: var(--bg3); color: var(--text2);
+  border: 1.5px solid var(--input-border); border-radius: 8px; font-size: 1rem;
+  cursor: pointer; transition: background .15s; white-space: nowrap; flex-shrink: 0;
+}
+#uploadBtn:hover { background: var(--accent-lite); border-color: var(--accent); color: var(--accent); }
+.ctrl-wrap { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.ctrl-wrap label { font-size: .82rem; color: var(--text2); }
+.ctrl-wrap input[type=number] {
+  width: 58px; padding: 10px 6px; border: 1.5px solid var(--input-border);
+  border-radius: 8px; font-size: .95rem; text-align: center; outline: none;
+  background: var(--bg2); color: var(--text);
+}
+.ctrl-wrap input[type=number]:focus { border-color: var(--accent); }
+#searchBtn {
+  padding: 10px 24px; background: var(--accent); color: #fff;
+  border: none; border-radius: 8px; font-size: .95rem; font-weight: 600;
+  cursor: pointer; transition: background .15s; white-space: nowrap;
+}
+#searchBtn:hover { background: var(--accent-h); }
+#searchBtn:disabled { opacity: .55; cursor: default; }
+
+/* recent searches bar */
+.history-bar {
+  background: var(--bg2); border-bottom: 1px solid var(--border);
+  padding: 7px 32px; display: flex; align-items: center; gap: 8px;
+  font-size: .78rem; overflow-x: auto;
+}
+.hist-label { color: var(--text3); flex-shrink: 0; font-weight: 600; }
+.hist-pills { display: flex; gap: 6px; flex: 1; overflow-x: auto; }
+.hist-pills::-webkit-scrollbar { display: none; }
+.hist-pill {
+  background: var(--bg3); color: var(--text2); border-radius: 20px;
+  padding: 3px 11px; cursor: pointer; white-space: nowrap; flex-shrink: 0;
+  border: 1px solid var(--border); font-size: .74rem; transition: background .12s;
+}
+.hist-pill:hover { background: var(--accent-lite); color: var(--accent); border-color: var(--accent); }
+.hist-clear { background: none; border: none; color: var(--text3); cursor: pointer;
+              font-size: .74rem; flex-shrink: 0; padding: 2px 6px; }
+.hist-clear:hover { color: var(--neg-text); }
+
+/* color filter bar */
+.color-bar {
+  background: var(--bg2); border-bottom: 1px solid var(--border);
+  padding: 7px 32px; display: flex; align-items: center; gap: 8px;
+  font-size: .78rem; flex-wrap: wrap;
+}
+.color-label { color: var(--text3); flex-shrink: 0; font-weight: 600; }
+.color-chip {
+  border-radius: 20px; padding: 3px 11px; cursor: pointer; font-size: .73rem;
+  font-weight: 600; color: #fff; flex-shrink: 0; user-select: none;
+  border: 2px solid transparent; transition: transform .1s, border-color .1s;
+  text-shadow: 0 1px 2px rgba(0,0,0,.4);
+}
+.color-chip:hover { transform: scale(1.08); }
+.color-chip.active { border-color: var(--text); box-shadow: 0 0 0 2px var(--text); }
+.color-chip-white { color: #333 !important; text-shadow: none !important; }
+#colorClear { background: none; border: none; color: var(--text3); cursor: pointer;
+              font-size: .74rem; padding: 2px 6px; }
+#colorClear:hover { color: var(--neg-text); }
+
+#status { padding: 8px 32px; font-size: .82rem; color: var(--text2);
+          min-height: 34px; display: flex; align-items: center; gap: 8px; }
+.spinner { width: 14px; height: 14px; border: 2px solid var(--border);
+           border-top-color: var(--accent); border-radius: 50%;
+           animation: spin .7s linear infinite; display: none; flex-shrink: 0; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+#results {
+  padding: 16px 32px 48px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  align-items: start; gap: 16px;
+}
+.card {
+  background: var(--bg2); border-radius: 10px; box-shadow: var(--sh-sm);
+  cursor: pointer; transition: transform .12s, box-shadow .12s;
+  position: relative; overflow: hidden;
+}
+.card:hover { transform: translateY(-3px); box-shadow: var(--sh-md); }
+.card-img { width: 100%; height: auto; display: block; background: var(--card-img-bg); }
+.card-body { padding: 10px 12px; }
+.card-rank { font-size: .67rem; font-weight: 700; color: var(--text3);
+             text-transform: uppercase; letter-spacing: .06em; margin-bottom: 3px; }
+.card-fname { font-family: 'Courier New', monospace; font-size: .7rem;
+              color: var(--text2); word-break: break-all; margin-bottom: 8px; }
+.score-row { display: flex; align-items: center; gap: 7px; }
+.score-bg { flex: 1; height: 5px; background: var(--bg3); border-radius: 3px; overflow: hidden; }
+.score-fill { height: 100%; border-radius: 3px; background: var(--accent); }
+.score-val { font-size: .78rem; font-weight: 700; color: var(--accent); white-space: nowrap; }
+.dup-badge { margin-top: 7px; padding: 3px 7px; border-radius: 4px;
+             background: var(--dup-bg); color: var(--dup-text); font-size: .68rem; font-weight: 600; }
+.similar-btn {
+  position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,.55); color: #fff;
+  border: none; border-radius: 5px; padding: 4px 10px; font-size: .7rem;
+  font-weight: 600; cursor: pointer; opacity: 0; transition: opacity .15s; pointer-events: none;
+}
+.card:hover .similar-btn { opacity: 1; pointer-events: auto; }
+
+#lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.86);
+            z-index: 100; align-items: center; justify-content: center; flex-direction: column; gap: 12px; }
+#lightbox.open { display: flex; }
+#lightbox img { max-width: 90vw; max-height: 78vh; object-fit: contain;
+                border-radius: 6px; box-shadow: 0 8px 32px rgba(0,0,0,.5); }
+.lb-caption { color: #fff; font-size: .84rem; opacity: .7; text-align: center; }
+.lb-actions { display: flex; gap: 10px; }
+.lb-btn { padding: 8px 20px; border-radius: 7px; border: none; cursor: pointer;
+          font-size: .85rem; font-weight: 600; }
+.lb-similar-btn { background: var(--accent); color: #fff; }
+.lb-similar-btn:hover { background: var(--accent-h); }
+.lb-close-btn { background: rgba(255,255,255,.15); color: #fff; }
+.lb-close-btn:hover { background: rgba(255,255,255,.25); }
+.lb-esc { position: absolute; top: 18px; right: 24px; color: #fff;
+          font-size: 2rem; cursor: pointer; opacity: .55; line-height: 1; }
+.lb-esc:hover { opacity: 1; }
+
+/* rebuild modal */
+.rebuild-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.75);
+                 z-index: 200; align-items: center; justify-content: center; }
+.rebuild-modal.open { display: flex; }
+.rebuild-inner { background: var(--bg2); border-radius: 12px; padding: 28px 32px;
+                 min-width: 340px; max-width: 480px; box-shadow: var(--sh-md); }
+.rebuild-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 16px; color: var(--text); }
+.rebuild-progress-bar { height: 8px; background: var(--bg3); border-radius: 4px;
+                        overflow: hidden; margin-bottom: 10px; }
+.rebuild-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width .3s; width: 0%; }
+.rebuild-msg { font-size: .82rem; color: var(--text2); margin-bottom: 16px; }
+.rebuild-close { padding: 7px 18px; background: var(--accent); color: #fff; border: none;
+                 border-radius: 7px; font-size: .85rem; font-weight: 600; cursor: pointer; display: none; }
+
+.empty { grid-column: 1/-1; text-align: center; padding: 60px 0; color: var(--text3); font-size: 1rem; }
+.neg-tag { display: inline-block; background: var(--neg-bg); color: var(--neg-text);
+           border-radius: 4px; padding: 1px 6px; font-size: .75rem; font-weight: 600; margin-left: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>MobileClipS2 Image Search</h1>
+    <div class="sub"><span id="imgCount">{{N_IMAGES}}</span> images indexed</div>
+  </div>
+  <button id="rebuildBtn" title="Index any newly added images">&#8635; Rebuild Index</button>
+  <button id="themeToggle" title="Toggle dark mode">&#127769;</button>
+</header>
+
+<div class="search-bar" id="searchBar">
+  <div class="autocomplete-wrap">
+    <input type="text" id="queryInput"
+           placeholder='Try "eagle -cage", "two horses", "waterfall"&hellip;'
+           autocomplete="off" autofocus>
+    <div class="ac-dropdown" id="acDropdown"></div>
+  </div>
+  <button id="uploadBtn" title="Search by image (or drag an image onto this bar)">&#128247;</button>
+  <input type="file" id="fileInput" accept="image/*" style="display:none">
+  <div class="ctrl-wrap">
+    <label for="kInput">Top&nbsp;K</label>
+    <input type="number" id="kInput" value="10" min="1" max="50">
+  </div>
+  <button id="searchBtn" onclick="doSearch()">Search</button>
+</div>
+
+<div class="history-bar" id="historyBar" style="display:none">
+  <span class="hist-label">Recent:</span>
+  <div class="hist-pills" id="historyPills"></div>
+  <button class="hist-clear" onclick="clearHistory()">Clear</button>
+</div>
+
+<div class="color-bar" id="colorBar" style="display:none">
+  <span class="color-label">Filter by color:</span>
+  <div id="colorPills"></div>
+  <button id="colorClear" onclick="clearColorFilter()" style="display:none">&times; Clear</button>
+</div>
+
+<div id="status">
+  <div class="spinner" id="spinner"></div>
+  <span id="statusText">Enter a query above and press Search or Enter.</span>
+</div>
+
+<div id="results">
+  <div class="empty">Your results will appear here.</div>
+</div>
+
+<div id="lightbox">
+  <span class="lb-esc" id="lbEsc">&times;</span>
+  <img id="lbImg" src="" alt="">
+  <div class="lb-caption" id="lbCaption"></div>
+  <div class="lb-actions">
+    <button class="lb-btn lb-similar-btn" id="lbSimilarBtn">Find Similar</button>
+    <button class="lb-btn lb-close-btn" id="lbCloseBtn">Close</button>
+  </div>
+</div>
+
+<div class="rebuild-modal" id="rebuildModal">
+  <div class="rebuild-inner">
+    <div class="rebuild-title">Rebuilding Image Index</div>
+    <div class="rebuild-progress-bar"><div class="rebuild-fill" id="rebuildFill"></div></div>
+    <div class="rebuild-msg" id="rebuildMsg">Starting&hellip;</div>
+    <button class="rebuild-close" id="rebuildClose" onclick="closeRebuild()">Done</button>
+  </div>
+</div>
+
+<script>
+const queryInput = document.getElementById('queryInput');
+const kInput     = document.getElementById('kInput');
+const searchBtn  = document.getElementById('searchBtn');
+const uploadBtn  = document.getElementById('uploadBtn');
+const fileInput  = document.getElementById('fileInput');
+const spinner    = document.getElementById('spinner');
+const statusText = document.getElementById('statusText');
+const resultsEl  = document.getElementById('results');
+const lightbox   = document.getElementById('lightbox');
+const lbImg      = document.getElementById('lbImg');
+const lbCaption  = document.getElementById('lbCaption');
+const searchBar  = document.getElementById('searchBar');
+
+let currentLbFilename = '';
+let activeColor       = '';
+
+function escHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ---------------------------------------------------------------------------
+// Dark mode
+// ---------------------------------------------------------------------------
+const themeToggle = document.getElementById('themeToggle');
+function applyTheme(dark) {
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : '');
+  themeToggle.textContent = dark ? '\\u2600\\uFE0F' : '\\uD83C\\uDF19';
+  localStorage.setItem('theme', dark ? 'dark' : 'light');
+}
+(function initTheme() {
+  const saved = localStorage.getItem('theme');
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  applyTheme(saved === 'dark' || (!saved && prefersDark));
+})();
+themeToggle.addEventListener('click', function() {
+  applyTheme(document.documentElement.getAttribute('data-theme') !== 'dark');
+});
+
+// ---------------------------------------------------------------------------
+// Recent searches (localStorage)
+// ---------------------------------------------------------------------------
+function addToHistory(q, mode) {
+  let h = JSON.parse(localStorage.getItem('searchHistory') || '[]');
+  h = h.filter(function(x) { return !(x.q === q && x.mode === mode); });
+  h.unshift({ q: q, mode: mode || 'text' });
+  h = h.slice(0, 20);
+  localStorage.setItem('searchHistory', JSON.stringify(h));
+  renderHistory();
+}
+function renderHistory() {
+  const h    = JSON.parse(localStorage.getItem('searchHistory') || '[]');
+  const bar  = document.getElementById('historyBar');
+  const pils = document.getElementById('historyPills');
+  if (!h.length) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  pils.innerHTML = h.map(function(x, i) {
+    const icon = x.mode === 'similar' ? '\\uD83D\\uDCF7 ' : '';
+    return '<span class="hist-pill" data-i="' + i + '">' + icon + escHtml(x.q) + '</span>';
+  }).join('');
+  pils.querySelectorAll('.hist-pill').forEach(function(el) {
+    el.addEventListener('click', function() {
+      const item = h[parseInt(el.dataset.i)];
+      if (item.mode === 'similar') { doSimilarSearch(item.q); }
+      else { queryInput.value = item.q; doSearch(); }
+    });
+  });
+}
+function clearHistory() { localStorage.removeItem('searchHistory'); renderHistory(); }
+
+// ---------------------------------------------------------------------------
+// Filter by color
+// ---------------------------------------------------------------------------
+const COLOR_HEX = {
+  red:'#e53935', orange:'#fb8c00', yellow:'#fdd835', green:'#43a047',
+  cyan:'#00acc1', blue:'#1e88e5', purple:'#8e24aa', pink:'#e91e63',
+  brown:'#6d4c41', white:'#f5f5f5', gray:'#78909c', black:'#212121'
+};
+async function loadColors() {
+  try {
+    const res    = await fetch('/colors');
+    const colors = await res.json();
+    if (!colors.length) return;
+    const bar  = document.getElementById('colorBar');
+    const pils = document.getElementById('colorPills');
+    bar.style.display = 'flex';
+    pils.innerHTML = colors.map(function(c) {
+      const extra = (c === 'white') ? ' color-chip-white' : '';
+      return '<span class="color-chip' + extra + '" data-color="' + c +
+             '" style="background:' + (COLOR_HEX[c] || '#888') + '">' + c + '</span>';
+    }).join('');
+    pils.querySelectorAll('.color-chip').forEach(function(el) {
+      el.addEventListener('click', function() { toggleColor(el.dataset.color); });
+    });
+  } catch(_) {}
+}
+function toggleColor(c) {
+  activeColor = (activeColor === c) ? '' : c;
+  document.querySelectorAll('.color-chip').forEach(function(el) {
+    el.classList.toggle('active', el.dataset.color === activeColor);
+  });
+  const clearBtn = document.getElementById('colorClear');
+  if (clearBtn) clearBtn.style.display = activeColor ? 'inline-block' : 'none';
+  if (queryInput.value.trim()) doSearch();
+}
+function clearColorFilter() { if (activeColor) toggleColor(activeColor); }
+
+// ---------------------------------------------------------------------------
+// Autocomplete
+// ---------------------------------------------------------------------------
+const acDropdown = document.getElementById('acDropdown');
+let acItems = [], acIdx = -1, acTimer = null;
+
+queryInput.addEventListener('input', function() {
+  clearTimeout(acTimer);
+  acTimer = setTimeout(fetchSuggestions, 180);
+});
+queryInput.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') {
+    if (acIdx >= 0 && acDropdown.classList.contains('open')) { e.preventDefault(); selectSuggestion(acIdx); }
+    else { closeDropdown(); doSearch(); }
+    return;
+  }
+  if (!acDropdown.classList.contains('open')) return;
+  if (e.key === 'ArrowDown') { e.preventDefault(); acIdx = Math.min(acIdx + 1, acItems.length - 1); renderActive(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); acIdx = Math.max(acIdx - 1, -1); renderActive(); }
+  else if (e.key === 'Escape') closeDropdown();
+});
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.autocomplete-wrap')) closeDropdown();
+});
+function getLastWord() {
+  const parts = queryInput.value.split(' ');
+  return parts[parts.length - 1].replace(/^-/, '').toLowerCase();
+}
+async function fetchSuggestions() {
+  const prefix = getLastWord();
+  if (prefix.length < 2) { closeDropdown(); return; }
+  try {
+    const res  = await fetch('/suggest?q=' + encodeURIComponent(prefix) + '&limit=8');
+    const data = await res.json();
+    acItems = data; acIdx = -1;
+    if (!data.length) { closeDropdown(); return; }
+    acDropdown.innerHTML = data.map(function(it, i) {
+      const hi = '<em>' + it.term.slice(0, prefix.length) + '</em>' + it.term.slice(prefix.length);
+      return '<div class="ac-item" data-i="' + i + '">' +
+        '<span class="ac-term">' + hi + '</span>' +
+        '<span class="ac-count">' + it.count.toLocaleString() + ' images</span></div>';
+    }).join('');
+    acDropdown.querySelectorAll('.ac-item').forEach(function(el) {
+      el.addEventListener('mousedown', function(e) { e.preventDefault(); selectSuggestion(parseInt(el.dataset.i)); });
+    });
+    acDropdown.classList.add('open');
+  } catch(_) {}
+}
+function selectSuggestion(i) {
+  const parts = queryInput.value.split(' ');
+  parts[parts.length - 1] = acItems[i].term;
+  queryInput.value = parts.join(' ');
+  closeDropdown(); doSearch();
+}
+function closeDropdown() { acDropdown.classList.remove('open'); acIdx = -1; }
+function renderActive() {
+  acDropdown.querySelectorAll('.ac-item').forEach(function(el, i) {
+    el.classList.toggle('active', i === acIdx);
+    if (i === acIdx) el.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+function getK() { return parseInt(kInput.value) || 10; }
+
+async function doSearch() {
+  const q = queryInput.value.trim();
+  if (!q) return;
+  addToHistory(q, 'text');
+  startLoading('Searching\\u2026');
+  let url = '/search?q=' + encodeURIComponent(q) + '&k=' + getK();
+  if (activeColor) url += '&color=' + encodeURIComponent(activeColor);
+  try {
+    const res  = await fetch(url);
+    const data = await res.json();
+    if (data.error) { statusText.textContent = 'Error: ' + data.error; return; }
+    renderResults(data.results, buildTextStatus(data));
+  } catch(err) { statusText.textContent = 'Request failed: ' + err.message; }
+  finally { stopLoading(); }
+}
+function buildTextStatus(data) {
+  let s = data.results.length + ' results for "' + escHtml(data.positive) + '"';
+  if (activeColor) s += ' &mdash; color: <b>' + activeColor + '</b>';
+  if (data.negatives && data.negatives.length) {
+    s += ' &mdash; excluding: ' + data.negatives.map(function(n) {
+      return '<span class="neg-tag">-' + escHtml(n) + '</span>';
+    }).join(' ');
+  }
+  return s;
+}
+async function doSimilarSearch(filename) {
+  addToHistory(filename, 'similar');
+  queryInput.value = '';
+  startLoading('Finding images similar to ' + filename + '\\u2026');
+  try {
+    const res  = await fetch('/similar?img=' + encodeURIComponent(filename) + '&k=' + getK());
+    const data = await res.json();
+    if (data.error) { statusText.textContent = 'Error: ' + data.error; return; }
+    renderResults(data.results, data.results.length + ' images similar to <b>' + escHtml(data.query_image) + '</b>');
+  } catch(err) { statusText.textContent = 'Request failed: ' + err.message; }
+  finally { stopLoading(); }
+}
+async function doUploadSearch(file) {
+  queryInput.value = '';
+  startLoading('Encoding uploaded image\\u2026');
+  const fd = new FormData();
+  fd.append('image', file);
+  try {
+    const res  = await fetch('/search_by_image?k=' + getK(), { method: 'POST', body: fd });
+    const data = await res.json();
+    if (data.error) { statusText.textContent = 'Error: ' + data.error; return; }
+    renderResults(data.results, data.results.length + ' images similar to uploaded image');
+  } catch(err) { statusText.textContent = 'Request failed: ' + err.message; }
+  finally { stopLoading(); }
+}
+function startLoading(msg) {
+  searchBtn.disabled = true; spinner.style.display = 'block';
+  statusText.innerHTML = msg; resultsEl.innerHTML = '';
+}
+function stopLoading() { searchBtn.disabled = false; spinner.style.display = 'none'; }
+
+// ---------------------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------------------
+function renderResults(results, statusHTML) {
+  statusText.innerHTML = statusHTML;
+  if (!results.length) { resultsEl.innerHTML = '<div class="empty">No results.</div>'; return; }
+  const maxScore = results[0].score || 1;
+  resultsEl.innerHTML = results.map(function(r) {
+    const pct = Math.round((r.score / maxScore) * 100);
+    const dup = r.duplicate_count > 0
+      ? '<div class="dup-badge">+' + r.duplicate_count + ' identical</div>' : '';
+    return '<div class="card" data-url="' + r.url + '" data-fname="' + r.filename +
+           '" data-score="' + r.score + '" data-rank="' + r.rank + '">' +
+      '<button class="similar-btn" data-fname="' + r.filename + '">Similar</button>' +
+      '<img class="card-img" src="' + r.url + '" loading="lazy" alt="">' +
+      '<div class="card-body">' +
+        '<div class="card-rank">#' + r.rank + '</div>' +
+        '<div class="card-fname">' + r.filename + '</div>' +
+        '<div class="score-row">' +
+          '<div class="score-bg"><div class="score-fill" style="width:' + pct + '%"></div></div>' +
+          '<span class="score-val">' + r.score.toFixed(4) + '</span>' +
+        '</div>' + dup +
+      '</div></div>';
+  }).join('');
+  resultsEl.onclick = function(e) {
+    const btn = e.target.closest('.similar-btn');
+    if (btn) { e.stopPropagation(); doSimilarSearch(btn.dataset.fname); return; }
+    const card = e.target.closest('.card');
+    if (card) openLightbox(card.dataset.url, card.dataset.fname,
+                           parseFloat(card.dataset.score), parseInt(card.dataset.rank));
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Lightbox
+// ---------------------------------------------------------------------------
+function openLightbox(url, fname, score, rank) {
+  currentLbFilename = fname;
+  lbImg.src = url;
+  lbCaption.textContent = '#' + rank + ' \\xb7 ' + fname + ' \\xb7 score ' + score.toFixed(4);
+  lightbox.classList.add('open');
+}
+function closeLightbox() { lightbox.classList.remove('open'); lbImg.src = ''; }
+lightbox.addEventListener('click', function(e) { if (e.target === lightbox) closeLightbox(); });
+document.getElementById('lbEsc').addEventListener('click', closeLightbox);
+document.getElementById('lbCloseBtn').addEventListener('click', closeLightbox);
+document.getElementById('lbSimilarBtn').addEventListener('click', function() {
+  closeLightbox(); doSimilarSearch(currentLbFilename);
+});
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeLightbox(); });
+
+// ---------------------------------------------------------------------------
+// Image upload
+// ---------------------------------------------------------------------------
+uploadBtn.addEventListener('click', function() { fileInput.click(); });
+fileInput.addEventListener('change', function(e) {
+  const f = e.target.files[0];
+  if (f) doUploadSearch(f);
+  e.target.value = '';
+});
+searchBar.addEventListener('dragover', function(e) { e.preventDefault(); searchBar.classList.add('drag-over'); });
+searchBar.addEventListener('dragleave', function() { searchBar.classList.remove('drag-over'); });
+searchBar.addEventListener('drop', function(e) {
+  e.preventDefault(); searchBar.classList.remove('drag-over');
+  const f = e.dataTransfer.files[0];
+  if (f && f.type.startsWith('image/')) doUploadSearch(f);
+});
+
+// ---------------------------------------------------------------------------
+// Rebuild index (POST /rebuild, stream progress over SSE)
+// ---------------------------------------------------------------------------
+const rebuildModal = document.getElementById('rebuildModal');
+const rebuildFill  = document.getElementById('rebuildFill');
+const rebuildMsg   = document.getElementById('rebuildMsg');
+const rebuildClose = document.getElementById('rebuildClose');
+let rebuildES = null;
+
+document.getElementById('rebuildBtn').addEventListener('click', async function() {
+  rebuildFill.style.width = '0%';
+  rebuildMsg.textContent  = 'Starting\\u2026';
+  rebuildClose.style.display = 'none';
+  rebuildModal.classList.add('open');
+  try {
+    const res  = await fetch('/rebuild', { method: 'POST' });
+    const data = await res.json();
+    if (data.error) { rebuildMsg.textContent = data.error; rebuildClose.style.display = 'inline-block'; return; }
+  } catch(err) { rebuildMsg.textContent = 'Failed to start: ' + err.message; rebuildClose.style.display = 'inline-block'; return; }
+
+  if (rebuildES) rebuildES.close();
+  rebuildES = new EventSource('/rebuild_stream');
+  rebuildES.onmessage = function(ev) {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'progress') {
+      const pct = m.total ? Math.round((m.done / m.total) * 100) : 100;
+      rebuildFill.style.width = pct + '%';
+      if (m.msg) rebuildMsg.textContent = m.msg;
+    } else if (m.type === 'done') {
+      rebuildFill.style.width = '100%';
+      rebuildMsg.textContent  = 'Done. ' + m.total.toLocaleString() + ' images indexed.';
+      document.getElementById('imgCount').textContent = m.total.toLocaleString();
+      rebuildClose.style.display = 'inline-block';
+      rebuildES.close(); rebuildES = null;
+      loadColors();
+    }
+  };
+  rebuildES.onerror = function() {
+    rebuildMsg.textContent = 'Connection lost. The rebuild may still be running in the background.';
+    rebuildClose.style.display = 'inline-block';
+    if (rebuildES) { rebuildES.close(); rebuildES = null; }
+  };
+});
+function closeRebuild() { rebuildModal.classList.remove('open'); }
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+renderHistory();
+loadColors();
+</script>
+</body>
+</html>"""
+
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=5000, debug=False)
