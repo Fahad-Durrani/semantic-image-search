@@ -33,6 +33,25 @@ model and ranks the library by cosine similarity.
 
 ---
 
+## 🖥️ The web interface
+
+The whole UI is a single page served at `http://127.0.0.1:5000` — a search bar
+with autocomplete, recent-search chips, a colour-filter bar, dark-mode toggle,
+and a responsive results grid where every card shows its rank, filename, and a
+normalised relevance bar. Click any image for a lightbox with a **Find Similar**
+button; drop an image on the bar to search by image.
+
+**Text search — `"Dog walking in park"`:**
+
+![Web UI: searching "Dog walking in park"](docs/ui-search-dog.png)
+
+**Mixed content — `"Chat screenshot"`** (note the `+1 identical` dedup badge on the
+last card, where a near-duplicate was collapsed):
+
+![Web UI: searching "Chat screenshot"](docs/ui-search-chats.png)
+
+---
+
 ## 🧠 How it works
 
 ```
