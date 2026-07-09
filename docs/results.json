@@ -1,0 +1,274 @@
+[
+  {
+    "query": "a lion in the wild",
+    "slug": "a-lion-in-the-wild",
+    "results": [
+      {
+        "rank": 1,
+        "filename": "5879.jpg",
+        "score": 0.2982,
+        "thumb": "docs/examples/a-lion-in-the-wild__1_5879.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 2,
+        "filename": "5126.jpg",
+        "score": 0.2946,
+        "thumb": "docs/examples/a-lion-in-the-wild__2_5126.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 3,
+        "filename": "1981.jpg",
+        "score": 0.2939,
+        "thumb": "docs/examples/a-lion-in-the-wild__3_1981.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 4,
+        "filename": "3790.jpg",
+        "score": 0.293,
+        "thumb": "docs/examples/a-lion-in-the-wild__4_3790.jpg",
+        "dup": 0
+      }
+    ]
+  },
+  {
+    "query": "sunset over the ocean",
+    "slug": "sunset-over-the-ocean",
+    "results": [
+      {
+        "rank": 1,
+        "filename": "3611.jpg",
+        "score": 0.2573,
+        "thumb": "docs/examples/sunset-over-the-ocean__1_3611.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 2,
+        "filename": "4469.jpg",
+        "score": 0.2536,
+        "thumb": "docs/examples/sunset-over-the-ocean__2_4469.jpg",
+        "dup": 1
+      },
+      {
+        "rank": 3,
+        "filename": "6076.jpg",
+        "score": 0.2499,
+        "thumb": "docs/examples/sunset-over-the-ocean__3_6076.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 4,
+        "filename": "2344.jpg",
+        "score": 0.2485,
+        "thumb": "docs/examples/sunset-over-the-ocean__4_2344.jpg",
+        "dup": 0
+      }
+    ]
+  },
+  {
+    "query": "city skyline at night",
+    "slug": "city-skyline-at-night",
+    "results": [
+      {
+        "rank": 1,
+        "filename": "2854.jpg",
+        "score": 0.3077,
+        "thumb": "docs/examples/city-skyline-at-night__1_2854.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 2,
+        "filename": "7357.jpg",
+        "score": 0.2842,
+        "thumb": "docs/examples/city-skyline-at-night__2_7357.jpg",
+        "dup": 1
+      },
+      {
+        "rank": 3,
+        "filename": "5389.jpg",
+        "score": 0.2756,
+        "thumb": "docs/examples/city-skyline-at-night__3_5389.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 4,
+        "filename": "5493.jpg",
+        "score": 0.2659,
+        "thumb": "docs/examples/city-skyline-at-night__4_5493.jpg",
+        "dup": 0
+      }
+    ]
+  },
+  {
+    "query": "a plate of healthy food",
+    "slug": "a-plate-of-healthy-food",
+    "results": [
+      {
+        "rank": 1,
+        "filename": "2610.jpg",
+        "score": 0.257,
+        "thumb": "docs/examples/a-plate-of-healthy-food__1_2610.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 2,
+        "filename": "3119.jpg",
+        "score": 0.2483,
+        "thumb": "docs/examples/a-plate-of-healthy-food__2_3119.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 3,
+        "filename": "5779.jpg",
+        "score": 0.2444,
+        "thumb": "docs/examples/a-plate-of-healthy-food__3_5779.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 4,
+        "filename": "5562.jpg",
+        "score": 0.242,
+        "thumb": "docs/examples/a-plate-of-healthy-food__4_5562.jpg",
+        "dup": 0
+      }
+    ]
+  },
+  {
+    "query": "snow covered mountains",
+    "slug": "snow-covered-mountains",
+    "results": [
+      {
+        "rank": 1,
+        "filename": "4743.jpg",
+        "score": 0.2877,
+        "thumb": "docs/examples/snow-covered-mountains__1_4743.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 2,
+        "filename": "6607.jpg",
+        "score": 0.277,
+        "thumb": "docs/examples/snow-covered-mountains__2_6607.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 3,
+        "filename": "5738.webp",
+        "score": 0.2664,
+        "thumb": "docs/examples/snow-covered-mountains__3_5738.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 4,
+        "filename": "237.jpg",
+        "score": 0.2647,
+        "thumb": "docs/examples/snow-covered-mountains__4_237.jpg",
+        "dup": 0
+      }
+    ]
+  },
+  {
+    "query": "a dog playing outdoors",
+    "slug": "a-dog-playing-outdoors",
+    "results": [
+      {
+        "rank": 1,
+        "filename": "6056.jpg",
+        "score": 0.2723,
+        "thumb": "docs/examples/a-dog-playing-outdoors__1_6056.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 2,
+        "filename": "3022.jpg",
+        "score": 0.2719,
+        "thumb": "docs/examples/a-dog-playing-outdoors__2_3022.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 3,
+        "filename": "3491.jpg",
+        "score": 0.2697,
+        "thumb": "docs/examples/a-dog-playing-outdoors__3_3491.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 4,
+        "filename": "4221.jpg",
+        "score": 0.2658,
+        "thumb": "docs/examples/a-dog-playing-outdoors__4_4221.jpg",
+        "dup": 0
+      }
+    ]
+  },
+  {
+    "query": "a cup of coffee on a table",
+    "slug": "a-cup-of-coffee-on-a-table",
+    "results": [
+      {
+        "rank": 1,
+        "filename": "2996.jpg",
+        "score": 0.2834,
+        "thumb": "docs/examples/a-cup-of-coffee-on-a-table__1_2996.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 2,
+        "filename": "7420.jpg",
+        "score": 0.2759,
+        "thumb": "docs/examples/a-cup-of-coffee-on-a-table__2_7420.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 3,
+        "filename": "3089.jpg",
+        "score": 0.2758,
+        "thumb": "docs/examples/a-cup-of-coffee-on-a-table__3_3089.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 4,
+        "filename": "3090.jpg",
+        "score": 0.2671,
+        "thumb": "docs/examples/a-cup-of-coffee-on-a-table__4_3090.jpg",
+        "dup": 0
+      }
+    ]
+  },
+  {
+    "query": "red sports car",
+    "slug": "red-sports-car",
+    "results": [
+      {
+        "rank": 1,
+        "filename": "6185.jpg",
+        "score": 0.2867,
+        "thumb": "docs/examples/red-sports-car__1_6185.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 2,
+        "filename": "6149.jpg",
+        "score": 0.2832,
+        "thumb": "docs/examples/red-sports-car__2_6149.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 3,
+        "filename": "3951.jpg",
+        "score": 0.2819,
+        "thumb": "docs/examples/red-sports-car__3_3951.jpg",
+        "dup": 0
+      },
+      {
+        "rank": 4,
+        "filename": "6180.jpg",
+        "score": 0.2815,
+        "thumb": "docs/examples/red-sports-car__4_6180.jpg",
+        "dup": 0
+      }
+    ]
+  }
+]

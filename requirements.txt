@@ -1,8 +1,15 @@
+# Core dependencies actually used by app.py / build_index.py
 torch>=2.1.0
-open-clip-torch>=3.0.0
-huggingface-hub>=0.20.0
-Pillow>=10.0.0
 numpy>=1.26.0
-fastapi>=0.110.0
-uvicorn[standard]>=0.27.0
+Pillow>=10.0.0
 tqdm>=4.66.0
+flask>=3.0.0
+
+# Apple's MobileCLIP package is installed separately (editable), NOT from PyPI:
+#   git clone https://github.com/apple/ml-mobileclip.git
+#   pip install -e ./ml-mobileclip --no-deps
+# Its own dependencies (open_clip_torch, timm) are listed below. Do NOT use
+# open_clip to LOAD the model directly -- its image normalisation differs from
+# Apple's checkpoint; always load via the mobileclip package.
+open_clip_torch>=2.24.0
+timm>=0.9.0
