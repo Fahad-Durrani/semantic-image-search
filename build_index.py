@@ -1,16 +1,18 @@
 """Build the embedding index for the image search app.
 
-Uses Apple's official `mobileclip` package (ml-mobileclip) with the local
-mobileclip_s2.pt checkpoint -- this applies Apple's own image normalization,
-unlike the open_clip/HuggingFace variant used previously.
+Uses Apple's official `mobileclip` package (ml-mobileclip) with a local
+mobileclip_s2.pt / mobileclip_s0.pt checkpoint -- this applies Apple's own
+image normalization, unlike the open_clip/HuggingFace variant used previously.
 
-Outputs cache/embeddings.npz with two aligned arrays:
+Outputs cache/embeddings.npz (or cache/embeddings_s0.npz for --model s0) with
+two aligned arrays:
   embeddings : (N, 512) float32, L2-normalised
   filenames  : (N,)      bare filenames (e.g. "1.jpg") served from images_repo
 
 A tqdm progress bar tracks embedding creation.
 """
 import os
+import argparse
 import numpy as np
 import torch
 from pathlib import Path
@@ -21,14 +23,34 @@ import mobileclip
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(BASE_DIR, "images_repo")
 CACHE_DIR  = os.path.join(BASE_DIR, "cache")
-CACHE_FILE = os.path.join(CACHE_DIR, "embeddings.npz")
-CHECKPOINT = os.path.join(BASE_DIR, "checkpoints", "mobileclip_s2.pt")
-MODEL_NAME = "mobileclip_s2"
 SUPPORTED  = {'.jpg', '.jpeg', '.png', '.webp', '.avif', '.jfif'}
 BATCH_SIZE = 32
 
+# Keep in sync with app.py's MODEL_CONFIGS.
+MODEL_CONFIGS = {
+    "s2": {
+        "model_name": "mobileclip_s2",
+        "checkpoint": os.path.join(BASE_DIR, "checkpoints", "mobileclip_s2.pt"),
+        "cache_file": os.path.join(CACHE_DIR, "embeddings.npz"),
+    },
+    "s0": {
+        "model_name": "mobileclip_s0",
+        "checkpoint": os.path.join(BASE_DIR, "checkpoints", "mobileclip_s0.pt"),
+        "cache_file": os.path.join(CACHE_DIR, "embeddings_s0.npz"),
+    },
+}
+
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", choices=sorted(MODEL_CONFIGS), default="s2")
+    args = parser.parse_args()
+
+    cfg        = MODEL_CONFIGS[args.model]
+    MODEL_NAME = cfg["model_name"]
+    CHECKPOINT = cfg["checkpoint"]
+    CACHE_FILE = cfg["cache_file"]
+
     if not os.path.isfile(CHECKPOINT):
         raise SystemExit(f"Checkpoint not found: {CHECKPOINT}")
 
