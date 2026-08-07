@@ -33,6 +33,18 @@ MODEL_CONFIGS = {
         "cache_file": os.path.join(BASE_DIR, "cache", "embeddings_s0.npz"),
         "suggestions_file": os.path.join(BASE_DIR, "cache", "suggestions_s0.json"),
     },
+    "s0_fp16": {
+        "model_name": "mobileclip_s0",
+        "label":      "MobileCLIP-S0 (fp16)",
+        "checkpoint": os.path.join(BASE_DIR, "checkpoints", "mobileclip_s0_fp16.pt"),
+        "cache_file": os.path.join(BASE_DIR, "cache", "embeddings_s0_fp16.npz"),
+        "suggestions_file": os.path.join(BASE_DIR, "cache", "suggestions_s0_fp16.json"),
+        # This checkpoint stores already-reparameterized (folded) MobileOne
+        # branches in fp16, not the raw multi-branch state dict create_model_
+        # and_transforms()'s default load path expects -- reparameterize the
+        # freshly-built model first so its keys match, then load into it.
+        "reparam_checkpoint": True,
+    },
 }
 DEFAULT_MODEL_KEY = "s2"
 
@@ -239,8 +251,24 @@ app = Flask(__name__)
 # Load once at startup
 # ---------------------------------------------------------------------------
 import mobileclip
+from mobileclip.modules.common.mobileone import reparameterize_model
 
 MODELS = {}   # model_key -> {embeddings, filenames, n_images, model, tokenizer, image_transform, device}
+
+
+def _load_model(model_name, checkpoint, device, reparam_checkpoint=False):
+    if reparam_checkpoint:
+        model, _, image_transform = mobileclip.create_model_and_transforms(
+            model_name, pretrained=None, reparameterize=False, device=device)
+        model = reparameterize_model(model)
+        state_dict = torch.load(checkpoint, map_location=device)
+        model.load_state_dict(state_dict)
+    else:
+        model, _, image_transform = mobileclip.create_model_and_transforms(
+            model_name, pretrained=checkpoint, device=device)
+    model.eval()
+    return model, image_transform
+
 
 for _key, _cfg in MODEL_CONFIGS.items():
     if not os.path.isfile(_cfg["cache_file"]):
@@ -256,12 +284,11 @@ for _key, _cfg in MODEL_CONFIGS.items():
     print(f"  {len(_filenames)} images indexed.", flush=True)
 
     print(f"Loading {_cfg['label']}...", flush=True)
-    _model, _, _image_transform = mobileclip.create_model_and_transforms(
-        _cfg["model_name"], pretrained=_cfg["checkpoint"])
-    _tokenizer = mobileclip.get_tokenizer(_cfg["model_name"])
-    _model.eval()
     _device = "cuda" if torch.cuda.is_available() else "cpu"
-    _model  = _model.to(_device)
+    _model, _image_transform = _load_model(
+        _cfg["model_name"], _cfg["checkpoint"], _device,
+        reparam_checkpoint=_cfg.get("reparam_checkpoint", False))
+    _tokenizer = mobileclip.get_tokenizer(_cfg["model_name"])
     print(f"  Model ready on {_device}.", flush=True)
 
     MODELS[_key] = {

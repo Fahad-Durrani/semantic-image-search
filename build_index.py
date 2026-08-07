@@ -1,11 +1,12 @@
 """Build the embedding index for the image search app.
 
 Uses Apple's official `mobileclip` package (ml-mobileclip) with a local
-mobileclip_s2.pt / mobileclip_s0.pt checkpoint -- this applies Apple's own
-image normalization, unlike the open_clip/HuggingFace variant used previously.
+mobileclip_s2.pt / mobileclip_s0.pt / mobileclip_s0_fp16.pt checkpoint -- this
+applies Apple's own image normalization, unlike the open_clip/HuggingFace
+variant used previously.
 
-Outputs cache/embeddings.npz (or cache/embeddings_s0.npz for --model s0) with
-two aligned arrays:
+Outputs cache/embeddings.npz (s2) / embeddings_s0.npz (s0) /
+embeddings_s0_fp16.npz (s0_fp16) with two aligned arrays:
   embeddings : (N, 512) float32, L2-normalised
   filenames  : (N,)      bare filenames (e.g. "1.jpg") served from images_repo
 
@@ -19,6 +20,7 @@ from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
 import mobileclip
+from mobileclip.modules.common.mobileone import reparameterize_model
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(BASE_DIR, "images_repo")
@@ -38,7 +40,32 @@ MODEL_CONFIGS = {
         "checkpoint": os.path.join(BASE_DIR, "checkpoints", "mobileclip_s0.pt"),
         "cache_file": os.path.join(CACHE_DIR, "embeddings_s0.npz"),
     },
+    "s0_fp16": {
+        "model_name": "mobileclip_s0",
+        "checkpoint": os.path.join(BASE_DIR, "checkpoints", "mobileclip_s0_fp16.pt"),
+        "cache_file": os.path.join(CACHE_DIR, "embeddings_s0_fp16.npz"),
+        # This checkpoint stores already-reparameterized (folded) MobileOne
+        # branches in fp16, not the raw multi-branch state dict create_model_
+        # and_transforms()'s default load path expects -- reparameterize the
+        # freshly-built model first so its keys match, then load into it.
+        "reparam_checkpoint": True,
+    },
 }
+
+
+def load_model(model_name, checkpoint, device, reparam_checkpoint=False):
+    if reparam_checkpoint:
+        model, _, preprocess = mobileclip.create_model_and_transforms(
+            model_name, pretrained=None, reparameterize=False, device=device)
+        model = reparameterize_model(model)
+        state_dict = torch.load(checkpoint, map_location=device)
+        model.load_state_dict(state_dict)
+        model.eval()
+    else:
+        model, _, preprocess = mobileclip.create_model_and_transforms(
+            model_name, pretrained=checkpoint, device=device)
+        model = model.eval()
+    return model, preprocess
 
 
 def main():
@@ -58,8 +85,9 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading {MODEL_NAME} from {CHECKPOINT} (device: {device}) ...", flush=True)
-    model, _, preprocess = mobileclip.create_model_and_transforms(MODEL_NAME, pretrained=CHECKPOINT)
-    model = model.eval().to(device)
+    model, preprocess = load_model(MODEL_NAME, CHECKPOINT, device,
+                                    reparam_checkpoint=cfg.get("reparam_checkpoint", False))
+    model = model.to(device)
     print("  Model loaded.", flush=True)
 
     image_files = sorted(

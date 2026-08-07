@@ -6,10 +6,11 @@ A fast, fully-local **semantic image search** engine over a personal library of
 search *by image* — all running on your own machine, no cloud, no API keys.
 
 Images are embedded once with **Apple's official [MobileCLIP](https://github.com/apple/ml-mobileclip)**
-— two switchable variants, **S2** and **S0**, both loaded at once. A Flask server
-then encodes your text query (or an uploaded image) with whichever model is
-selected and ranks the library by cosine similarity; a **Compare Models** view
-lets you run the same query against every model side by side.
+— three switchable variants, **S2**, **S0**, and **S0 (fp16)**, all loaded at
+once. A Flask server then encodes your text query (or an uploaded image) with
+whichever model is selected and ranks the library by cosine similarity; a
+**Compare Models** view lets you run the same query against every model side
+by side.
 
 ![Demo: top result for eight text queries](docs/demo.jpg)
 
@@ -60,23 +61,26 @@ last card, where a near-duplicate was collapsed):
 ## 🧠 How it works
 
 ```
-                 build_index.py --model {s2,s0} (offline, once per model)
+                 build_index.py --model {s2,s0,s0_fp16} (offline, once per model)
    images_repo/  ─────────────────────────────►  cache/embeddings.npz (s2)
-   (7,800 imgs)      MobileCLIP-S2/S0 encode_image  cache/embeddings_s0.npz (s0)
-                     + L2-normalise                 (N×512, L2-normalised)
+   (7,800 imgs)      MobileCLIP encode_image        cache/embeddings_s0.npz (s0)
+                     + L2-normalise                 cache/embeddings_s0_fp16.npz (s0_fp16)
+                                                     (N×512, L2-normalised)
 
-                 app.py (serving, loads BOTH models at startup)
+                 app.py (serving, loads ALL models at startup)
    "a red car"  ──► encode_text ──► 512-d vec ──►  dot product vs. every row
-   + &model=s0/s2   (selected model)                of the selected model's
+   + &model=...     (selected model)                of the selected model's
                                                      matrix ──► top-k ──► JSON + web UI
 ```
 
 Because both images and text are embedded by the **same model** and
 **L2-normalised**, cosine similarity is just a dot product. At ~7,800 images the
 whole index is a small matrix, so a brute-force NumPy `matmul` is instant — no
-vector database needed. Two model variants — **S2** and **S0** — are each
-embedded into their own cache file and loaded simultaneously; a dropdown in the
-UI switches which one answers a given request.
+vector database needed. Three model variants — **S2**, **S0**, and **S0 (fp16)**
+— are each embedded into their own cache file and loaded simultaneously; a
+dropdown in the UI switches which one answers a given request. S0 (fp16) is the
+same S0 architecture and weights, just exported at half precision — a smaller
+checkpoint (~108 MB vs. ~215 MB) to compare against the full-precision S0.
 
 **Score range.** MobileCLIP text→image cosine similarities are *not* confidences
 near 1.0 — good matches sit around **0.24–0.31**. Ranking order is what matters.
@@ -91,7 +95,7 @@ See [docs/RESULTS.md](docs/RESULTS.md).
 | **Python 3.10+** | Developed on 3.12 (Windows 11). |
 | **~2 GB RAM free** | For the model + index in memory. |
 | **The image library** | Not in this repo (too large). Put your own images in `images_repo/`, named however you like. |
-| **MobileCLIP checkpoints** | `mobileclip_s2.pt` (~380 MB) and, optionally, `mobileclip_s0.pt` (~215 MB), downloaded once each (see below). Not in this repo. |
+| **MobileCLIP checkpoints** | `mobileclip_s2.pt` (~380 MB) and, optionally, `mobileclip_s0.pt` (~215 MB) / `mobileclip_s0_fp16.pt` (~108 MB), downloaded/provided once each (see below). Not in this repo. |
 | GPU | Optional. CPU works fine at this scale. |
 
 > **What's *not* in this repo (by design):** the image library (`images_repo/`,
@@ -139,10 +143,10 @@ pip install -r requirements.txt
 
 ### 4. Download the checkpoints
 
-The app now loads **both** MobileCLIP variants at startup (so the model
-dropdown can switch instantly, with no restart) — download both
-**`mobileclip_s2.pt`** and **`mobileclip_s0.pt`** into a `checkpoints/` folder.
-Both come from the same Apple CDN:
+The app loads **all configured** MobileCLIP variants at startup (so the model
+dropdown can switch instantly, with no restart) — download **`mobileclip_s2.pt`**
+and **`mobileclip_s0.pt`** into a `checkpoints/` folder; both come from the same
+Apple CDN:
 
 ```powershell
 mkdir checkpoints
@@ -157,9 +161,15 @@ Invoke-WebRequest `
   -OutFile "checkpoints/mobileclip_s0.pt"
 ```
 
-> `app.py` will refuse to start if either checkpoint or its embedding cache is
-> missing (see step 6). To make one variant truly optional, remove its entry
-> from the `MODEL_CONFIGS` dict in both `app.py` and `build_index.py`.
+`mobileclip_s0_fp16.pt` (a half-precision export of the S0 architecture) isn't
+on Apple's CDN — place it at `checkpoints/mobileclip_s0_fp16.pt` if you have a
+copy. Its weights are already "reparameterized" (MobileOne branches folded), so
+loading it takes a different code path than the other two checkpoints; see
+`load_model()` in `build_index.py` / `_load_model()` in `app.py`.
+
+> `app.py` will refuse to start if any configured checkpoint or its embedding
+> cache is missing (see step 6). To make a variant truly optional, remove its
+> entry from the `MODEL_CONFIGS` dict in both `app.py` and `build_index.py`.
 
 ### 5. Add your images
 
@@ -171,12 +181,14 @@ Put your image files in `images_repo/` (a flat folder). Supported extensions:
 ```powershell
 python build_index.py --model s2
 python build_index.py --model s0
+python build_index.py --model s0_fp16
 ```
 
-This writes `cache/embeddings.npz` (s2) / `cache/embeddings_s0.npz` (s0) and shows
-a `tqdm` progress bar for each. Corrupt files are skipped automatically. Re-run
-only when the contents of `images_repo/` change (or use the in-app **Rebuild
-Index** button, which incrementally re-indexes new images for both models).
+This writes `cache/embeddings.npz` (s2) / `cache/embeddings_s0.npz` (s0) /
+`cache/embeddings_s0_fp16.npz` (s0_fp16) and shows a `tqdm` progress bar for
+each. Corrupt files are skipped automatically. Re-run only when the contents
+of `images_repo/` change (or use the in-app **Rebuild Index** button, which
+incrementally re-indexes new images for all models).
 
 ### 7. Run the app
 
@@ -184,14 +196,15 @@ Index** button, which incrementally re-indexes new images for both models).
 python app.py
 ```
 
-Open **http://127.0.0.1:5000** in your browser. Both models load at startup;
-use the **Model** dropdown next to Top K to switch between S2 and S0.
+Open **http://127.0.0.1:5000** in your browser. All models load at startup;
+use the **Model** dropdown next to Top K to switch between S2, S0, and S0 (fp16).
 
 Quick smoke test from the terminal:
 
 ```powershell
 Invoke-RestMethod -Uri "http://127.0.0.1:5000/search?q=lion&k=3&model=s2"
 Invoke-RestMethod -Uri "http://127.0.0.1:5000/search?q=lion&k=3&model=s0"
+Invoke-RestMethod -Uri "http://127.0.0.1:5000/search?q=lion&k=3&model=s0_fp16"
 ```
 
 ---
@@ -203,13 +216,13 @@ The server exposes a small JSON/HTTP API (default host `127.0.0.1:5000`):
 | Method & path | Purpose | Key params |
 |---------------|---------|------------|
 | `GET /` | The single-page web UI | — |
-| `GET /search` | Text search | `q` (query, supports `-negative` terms), `k` (1–50, default 10), `color`, `model` (`s2`\|`s0`, default `s2`) |
+| `GET /search` | Text search | `q` (query, supports `-negative` terms), `k` (1–50, default 10), `color`, `model` (`s2`\|`s0`\|`s0_fp16`, default `s2`) |
 | `GET /similar` | Nearest neighbours of an indexed image | `img` (filename), `k`, `model` |
 | `POST /search_by_image` | Search by an uploaded image | multipart `image` file, `k`, `model` |
 | `GET /suggest` | Autocomplete | `q` (prefix ≥2 chars), `limit`, `model` |
 | `GET /models` | List available models (for the dropdown / compare panels) | — |
 | `GET /colors` | List available colour-filter names | — (model-agnostic) |
-| `POST /rebuild` | Start an incremental re-index (both models) | — |
+| `POST /rebuild` | Start an incremental re-index (all models) | — |
 | `GET /rebuild_stream` | Server-sent-events progress for a rebuild | — |
 | `GET /images/<filename>` | Serve an image from `images_repo/` | — |
 
@@ -237,8 +250,8 @@ Response shape:
 
 ```
 semantic-image-search/
-├── app.py              # Flask server + embedded single-page frontend; loads both models
-├── build_index.py      # Offline indexer → cache/embeddings.npz (--model s2|s0)
+├── app.py              # Flask server + embedded single-page frontend; loads all models
+├── build_index.py      # Offline indexer → cache/embeddings*.npz (--model s2|s0|s0_fp16)
 ├── copy_images.py      # Helper: flatten nested folders into one dir
 ├── rename_folder.py    # Helper: rename a folder's images to 1..N
 ├── requirements.txt
@@ -250,17 +263,19 @@ semantic-image-search/
 │
 │   # ---- generated / provided locally, not in git ----
 ├── images_repo/        # Your image library
-├── checkpoints/        # mobileclip_s2.pt, mobileclip_s0.pt
+├── checkpoints/        # mobileclip_s2.pt, mobileclip_s0.pt, mobileclip_s0_fp16.pt
 ├── cache/              # embeddings.npz + suggestions.json (s2), embeddings_s0.npz + suggestions_s0.json (s0),
+│                       # embeddings_s0_fp16.npz + suggestions_s0_fp16.json (s0_fp16),
 │                       # colors.json, skip_list.json (shared)
 └── ml-mobileclip/      # Apple's package (cloned, installed editable)
 ```
 
 Paths are hard-coded in `app.py` and `build_index.py` — both define a
-`MODEL_CONFIGS` dict mapping `"s2"`/`"s0"` to their checkpoint/cache paths; keep
-these two dicts in sync if you move things or add another variant. See
-**[CLAUDE.md](CLAUDE.md)** for architecture details and the "things that will
-bite you" list (e.g. `model.eval()` is mandatory — MobileCLIP has batchnorm).
+`MODEL_CONFIGS` dict mapping `"s2"`/`"s0"`/`"s0_fp16"` to their checkpoint/cache
+paths; keep these two dicts in sync if you move things or add another variant.
+See **[CLAUDE.md](CLAUDE.md)** for architecture details and the "things that
+will bite you" list (e.g. `model.eval()` is mandatory — MobileCLIP has
+batchnorm).
 
 ---
 
@@ -285,9 +300,9 @@ Summary of top-1 scores:
 
 ## 🛠️ Troubleshooting
 
-- **`Checkpoint not found for MobileCLIP-S2/S0`** — you skipped step 4 for that variant.
+- **`Checkpoint not found for MobileCLIP-S2/S0/S0 (fp16)`** — you skipped step 4 for that variant.
 - **`No module named 'mobileclip'`** — run step 2 (`pip install -e ./ml-mobileclip --no-deps`).
-- **`Cache not found for MobileCLIP-S2/S0`** — run `python build_index.py --model s2` / `--model s0` (step 6).
+- **`Cache not found for MobileCLIP-S2/S0/S0 (fp16)`** — run `python build_index.py --model s2` / `s0` / `s0_fp16` (step 6).
 - **Weird / low-quality results** — make sure you're using Apple's `mobileclip`
   package, *not* `open_clip`; they normalise images differently.
 - **Port 5000 in use** — change the port in the last line of `app.py`
@@ -297,6 +312,6 @@ Summary of top-1 scores:
 
 ## 📄 Notes & credits
 
-- Model: **[Apple MobileCLIP](https://github.com/apple/ml-mobileclip)** (MobileCLIP-S2 and MobileCLIP-S0). Checkpoints © Apple, under Apple's licence.
+- Model: **[Apple MobileCLIP](https://github.com/apple/ml-mobileclip)** (MobileCLIP-S2, MobileCLIP-S0, and a half-precision export of S0). Checkpoints © Apple, under Apple's licence.
 - This project is a personal / educational local search tool. The image library and
   the model checkpoint are **not** distributed here.
