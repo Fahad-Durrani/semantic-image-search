@@ -13,3 +13,9 @@ flask>=3.0.0
 # Apple's checkpoint; always load via the mobileclip package.
 open_clip_torch>=2.24.0
 timm>=0.9.0
+
+# Only needed for the "tinyclip" model variant (wkcn/TinyCLIP-ViT-8M-16-Text-
+# 3M-YFCC15M), a genuinely different model family loaded via HuggingFace
+# transformers rather than the mobileclip package -- remove this and the
+# "tinyclip" entry in MODEL_CONFIGS if you don't want that variant.
+transformers>=4.40.0

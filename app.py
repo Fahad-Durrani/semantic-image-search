@@ -45,6 +45,44 @@ MODEL_CONFIGS = {
         # freshly-built model first so its keys match, then load into it.
         "reparam_checkpoint": True,
     },
+    "s0_int8": {
+        "model_name": "mobileclip_s0",
+        "label":      "MobileCLIP-S0 (int8)",
+        # Two independently int8-quantized TorchScript modules (image/text),
+        # not a single state-dict checkpoint like the other variants.
+        "checkpoint": {
+            "image": os.path.join(BASE_DIR, "checkpoints", "mobileclip_s0_image_int8.pt"),
+            "text":  os.path.join(BASE_DIR, "checkpoints", "mobileclip_s0_text_int8.pt"),
+        },
+        "cache_file": os.path.join(BASE_DIR, "cache", "embeddings_s0_int8.npz"),
+        "suggestions_file": os.path.join(BASE_DIR, "cache", "suggestions_s0_int8.json"),
+        "quantized": True,
+    },
+    "tinyclip": {
+        "model_name": "wkcn/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M",
+        "label":      "TinyCLIP-ViT-8M/16",
+        # A local snapshot of the HF hub repo (config.json, tokenizer.json,
+        # model.safetensors, preprocessor_config.json), not a mobileclip
+        # checkpoint file -- loaded via transformers, not the mobileclip package.
+        "checkpoint": os.path.join(BASE_DIR, "checkpoints", "tinyclip-vit-8m-16-text-3m-yfcc15m"),
+        "cache_file": os.path.join(BASE_DIR, "cache", "embeddings_tinyclip.npz"),
+        "suggestions_file": os.path.join(BASE_DIR, "cache", "suggestions_tinyclip.json"),
+        "hf_clip": True,
+    },
+    "tinyclip_resnet19m": {
+        # Registered with open_clip.add_model_config() at load time using this
+        # name (must match the config JSON's filename stem).
+        "model_name": "TinyCLIP-ResNet-19M-Text-19M",
+        "label":      "TinyCLIP-ResNet-19M/Text-19M",
+        "checkpoint": os.path.join(BASE_DIR, "checkpoints", "tinyclip_resnet19m_text19m_laion400m.pt"),
+        "open_clip_config": os.path.join(BASE_DIR, "checkpoints", "TinyCLIP-ResNet-19M-Text-19M.json"),
+        "cache_file": os.path.join(BASE_DIR, "cache", "embeddings_tinyclip_resnet19m.npz"),
+        "suggestions_file": os.path.join(BASE_DIR, "cache", "suggestions_tinyclip_resnet19m.json"),
+        # 1024-d embeddings, unlike every other variant (512-d). Nothing in
+        # this file assumes a fixed dimension, so this is safe -- just
+        # documented since it's the one place that differs.
+        "embed_dim": 1024,
+    },
 }
 DEFAULT_MODEL_KEY = "s2"
 
@@ -250,45 +288,174 @@ app = Flask(__name__)
 # ---------------------------------------------------------------------------
 # Load once at startup
 # ---------------------------------------------------------------------------
+import re
 import mobileclip
 from mobileclip.modules.common.mobileone import reparameterize_model
 
 MODELS = {}   # model_key -> {embeddings, filenames, n_images, model, tokenizer, image_transform, device}
 
 
-def _load_model(model_name, checkpoint, device, reparam_checkpoint=False):
-    if reparam_checkpoint:
+def _remap_tinyclip_open_clip_key(key):
+    """TinyCLIP's raw training checkpoints wrap real open_clip parameter names
+    under a training-only prefix (observed forms: "image_encoder_without_ddp.",
+    "_image_encoder.module.", "text_encoder_without_ddp.", "_text_encoder.module.",
+    "_logit_scale.module.(module.)?logit_scale") that vanilla open_clip's CLIP
+    class doesn't expect. Strip it so the remaining key matches the model's
+    real state dict (e.g. "_image_encoder.module.visual.conv1.weight" ->
+    "visual.conv1.weight"). Verified exact match (no missing/unexpected keys)
+    against TinyCLIP-ResNet-19M-Text-19M's checkpoint."""
+    if "logit_scale" in key:
+        return "logit_scale"
+    return re.sub(r"^_?(image_encoder|text_encoder)(_without_ddp)?(\.module)*\.", "", key)
+
+
+class _QuantizedDualEncoder:
+    """Wraps separately-quantized TorchScript image/text encoders (each a
+    self-contained scripted module callable as `model(tensor)`) behind the
+    same .encode_image()/.encode_text() interface used for the regular
+    mobileclip CLIP model."""
+
+    def __init__(self, image_model, text_model):
+        self.image_model = image_model
+        self.text_model  = text_model
+
+    def eval(self):
+        self.image_model.eval()
+        self.text_model.eval()
+        return self
+
+    def encode_image(self, tensor):
+        return self.image_model(tensor)
+
+    def encode_text(self, tokens):
+        return self.text_model(tokens)
+
+
+class _HFClipEncoder:
+    """Wraps a HuggingFace `transformers` CLIPModel -- a different loading path
+    entirely from Apple's mobileclip package -- behind the same
+    .encode_image()/.encode_text() interface used for the mobileclip models."""
+
+    def __init__(self, model):
+        self.model = model
+
+    def eval(self):
+        self.model.eval()
+        return self
+
+    def to(self, device):
+        self.model.to(device)
+        return self
+
+    @staticmethod
+    def _pooled(output):
+        # Some transformers versions return a plain tensor from get_image_features/
+        # get_text_features, others wrap it in an output object with .pooler_output.
+        return output.pooler_output if hasattr(output, "pooler_output") else output
+
+    def encode_image(self, pixel_values):
+        return self._pooled(self.model.get_image_features(pixel_values=pixel_values))
+
+    def encode_text(self, tokens):
+        return self._pooled(self.model.get_text_features(**tokens))
+
+
+class _HFImageTransform:
+    """Per-image preprocessing callable matching mobileclip's `preprocess(img)`
+    signature, backed by a HF CLIPImageProcessor."""
+
+    def __init__(self, image_processor):
+        self.image_processor = image_processor
+
+    def __call__(self, img):
+        return self.image_processor(images=img, return_tensors="pt")["pixel_values"][0]
+
+
+class _HFTextTokenizer:
+    """Batch-of-strings tokenizer callable matching mobileclip's tokenizer
+    signature (returns a `.to(device)`-able object), backed by a HF tokenizer."""
+
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    def __call__(self, texts):
+        return self.tokenizer(list(texts), return_tensors="pt", padding=True, truncation=True)
+
+
+def _load_model(model_name, checkpoint, device, reparam_checkpoint=False, quantized=False,
+                 hf_clip=False, open_clip_config=None):
+    if open_clip_config:
+        import open_clip
+        open_clip.add_model_config(open_clip_config)
+        model, _, image_transform = open_clip.create_model_and_transforms(
+            model_name, pretrained=None, device=device)
+        raw = torch.load(checkpoint, map_location=device, weights_only=False)
+        state_dict = raw["state_dict"] if isinstance(raw, dict) and "state_dict" in raw else raw
+        remapped = {_remap_tinyclip_open_clip_key(k): v for k, v in state_dict.items()}
+        model.load_state_dict(remapped)
+        tokenizer = open_clip.get_tokenizer(model_name)
+    elif hf_clip:
+        from transformers import CLIPModel, CLIPProcessor
+        clip_model = CLIPModel.from_pretrained(checkpoint, local_files_only=True).to(device)
+        processor = CLIPProcessor.from_pretrained(checkpoint, local_files_only=True)
+        model = _HFClipEncoder(clip_model)
+        image_transform = _HFImageTransform(processor.image_processor)
+        tokenizer = _HFTextTokenizer(processor.tokenizer)
+    elif quantized:
+        # Quantized int8 ops only run on CPU (fbgemm/qnnpack backends), regardless
+        # of CUDA availability -- the caller is expected to pass device="cpu".
+        image_model = torch.jit.load(checkpoint["image"], map_location=device)
+        text_model  = torch.jit.load(checkpoint["text"], map_location=device)
+        model = _QuantizedDualEncoder(image_model, text_model)
+        # Preprocessing transform is architecture-derived, not weight-derived,
+        # so a throwaway float32 model is enough to fetch it.
+        _, _, image_transform = mobileclip.create_model_and_transforms(
+            model_name, pretrained=None, reparameterize=False, device=device)
+        tokenizer = mobileclip.get_tokenizer(model_name)
+    elif reparam_checkpoint:
         model, _, image_transform = mobileclip.create_model_and_transforms(
             model_name, pretrained=None, reparameterize=False, device=device)
         model = reparameterize_model(model)
         state_dict = torch.load(checkpoint, map_location=device)
         model.load_state_dict(state_dict)
+        tokenizer = mobileclip.get_tokenizer(model_name)
     else:
         model, _, image_transform = mobileclip.create_model_and_transforms(
             model_name, pretrained=checkpoint, device=device)
+        tokenizer = mobileclip.get_tokenizer(model_name)
     model.eval()
-    return model, image_transform
+    return model, image_transform, tokenizer
 
 
 for _key, _cfg in MODEL_CONFIGS.items():
     if not os.path.isfile(_cfg["cache_file"]):
         sys.exit(f"Cache not found for {_cfg['label']}: {_cfg['cache_file']} "
                   f"-- run `python build_index.py --model {_key}` first.")
-    if not os.path.isfile(_cfg["checkpoint"]):
-        sys.exit(f"Checkpoint not found for {_cfg['label']}: {_cfg['checkpoint']}")
+    if _cfg.get("hf_clip"):
+        _missing_checkpoints = [] if os.path.isdir(_cfg["checkpoint"]) else [_cfg["checkpoint"]]
+    else:
+        _checkpoint_paths = list(_cfg["checkpoint"].values()) if isinstance(_cfg["checkpoint"], dict) else [_cfg["checkpoint"]]
+        if _cfg.get("open_clip_config"):
+            _checkpoint_paths.append(_cfg["open_clip_config"])
+        _missing_checkpoints = [p for p in _checkpoint_paths if not os.path.isfile(p)]
+    if _missing_checkpoints:
+        sys.exit(f"Checkpoint not found for {_cfg['label']}: {_missing_checkpoints[0]}")
 
     print(f"Loading embedding cache for {_cfg['label']}...", flush=True)
     _data       = np.load(_cfg["cache_file"])
-    _embeddings = _data["embeddings"]   # (N, 512) float32, L2-normalised
+    _embeddings = _data["embeddings"]   # (N, D) float32, L2-normalised
     _filenames  = _data["filenames"]    # (N,)
     print(f"  {len(_filenames)} images indexed.", flush=True)
 
     print(f"Loading {_cfg['label']}...", flush=True)
-    _device = "cuda" if torch.cuda.is_available() else "cpu"
-    _model, _image_transform = _load_model(
+    # Quantized int8 ops only run on CPU, regardless of CUDA availability.
+    _device = "cpu" if _cfg.get("quantized") else ("cuda" if torch.cuda.is_available() else "cpu")
+    _model, _image_transform, _tokenizer = _load_model(
         _cfg["model_name"], _cfg["checkpoint"], _device,
-        reparam_checkpoint=_cfg.get("reparam_checkpoint", False))
-    _tokenizer = mobileclip.get_tokenizer(_cfg["model_name"])
+        reparam_checkpoint=_cfg.get("reparam_checkpoint", False),
+        quantized=_cfg.get("quantized", False),
+        hf_clip=_cfg.get("hf_clip", False),
+        open_clip_config=_cfg.get("open_clip_config"))
     print(f"  Model ready on {_device}.", flush=True)
 
     MODELS[_key] = {
